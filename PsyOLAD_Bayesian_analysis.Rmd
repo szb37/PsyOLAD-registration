@@ -1,0 +1,118 @@
+---
+title: "PsyOLAD Meta Analysis Script"
+author: "Zack Williams"
+date: "2023-07-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(metafor,brms,bayestestR)
+df <- read.csv('test_data_v3.csv')
+df$dtype <- as.factor(df$dtype)
+df$design <- as.factor(df$design)
+df$scale <- as.factor(df$scale)
+df$bsl <- df$pep <- NULL
+df <- df %>% pivot_wider(names_from = c(tp_tag),values_from = c(mean,se,std,var)) 
+df <- df[df$study %in% unique(df$study)[1:85],] # Include only first 85 unique studies to have roughly approximate-sized corpus
+set.seed(420)
+df1 <- df[sample(1:nrow(df),size = 150),] # Now sample 150 rows total to include variable numbers of measures per study
+df1$effect <- 1:nrow(df1) # Number the effects 
+df2 <- df[which(df$dtype=="psy")[1:45],]
+df2$effect <- 1:nrow(df2)
+df3 <- df[which(df$dtype=="ssri"),]
+df3$effect <- 1:nrow(df3)
+
+# Priors
+prior_mods <- c(prior(student_t(3,-10,3),class="Intercept"),
+  prior(normal(0, 3),class="b"),
+  prior(normal(0,0.5),class="b",coef = "mean_bsl"),
+  prior(cauchy(0,1), class = "sd"),
+  prior(cauchy(0,0.3), class = "sd",coef="mean_bsl",group="study"),
+  prior(cauchy(0,0.3), class = "sd",coef="mean_bsl",group="study:effect"),
+  prior(cauchy(0,0.3), class = "sd",coef="mean_bsl",group="scale"),
+  prior(lkj(2),class="cor")
+  )
+
+# Model formulae
+bf_mod1 <- bf(mean_pep | se(se_pep)  ~ mean_bsl + dtype +  (1 + mean_bsl + dtype|study) + (1 + mean_bsl + dtype |study:effect) + (1 + mean_bsl + dtype |scale))
+
+bf_mod23 <- bf(mean_pep | se(se_pep)  ~ mean_bsl + is_blind +  (1 + mean_bsl + is_blind|study) + (1 + mean_bsl + is_blind |study:effect) + (1 + mean_bsl + is_blind |scale))
+```
+
+
+PRIORS:
+
+INTERCEPT: Student t3(-10, 3)
+Beta [BSL]: Normal(0, 0.5)
+Beta [STUDY_TYPE, BLIND, INTERACTION]: Normal(0, 3)
+SD (i.e., tau) [BSL]: Half-Cauchy(0, 0.3) 
+SD (i.e., tau) [STUDY_TYPE, BLIND, INTERACTION]: Half-Cauchy(0, 1)
+COR: LKJ(2)
+
+Model 1: (PAT > OLAD at primary outcome timepoint) 
+
+BRMS model formula: ENDPOINT_HAMD | se(SE_ENDPOINT_HAMD)  ~ BSL_HAMD + STUDY_TYPE +  (1 + BSL_HAMD + STUDY_TYPE|study) + (1 + BSL_HAMD + STUDY_TYPE |study:effect) + (1 + BSL_HAMD + STUDY_TYPE |measure)
+
+Hypothesis operationalization: one-sided Bayes factor for fixed effect of STUDY_TYPE exceeding HAMD17 MCID ≥ 3. Posterior probability of hypothesis will also be reported (>95% deemed very strong support for non-equivalence hypothesis). 
+
+Model 2 (OL PAT = Blinded PAT at primary outcome timepoint)
+
+BRMS model formula: ENDPOINT_HAMD | se(SE_ENDPOINT_HAMD)  ~ BSL_HAMD + BLINDED +  (1 + BSL_HAMD + BLINDED |study) + (1 + BSL_HAMD + BLINDED |study:effect) + (1 + BSL_HAMD + BLINDED |measure)
+
+Hypothesis operationalization: two-sided Bayes factor for fixed effect of BLINDED exceeding HAMD17 MCID ≤ 1/3. Posterior probability of hypothesis will also be reported (<5% deemed very strong support for equivalence hypothesis; 5-10% and 10-15% deemed strong and moderate support for equivalence hypothesis). 
+
+Model 3 (OL AD > Blinded AD at primary outcome timepoint)
+
+BRMS model formula: ENDPOINT_HAMD | se(SE_ENDPOINT_HAMD)  ~ BSL_HAMD + BLINDED +  (1 + BSL_HAMD + BLINDED |study) + (1 + BSL_HAMD + BLINDED |study:effect) + (1 + BSL_HAMD + BLINDED |measure)
+
+Hypothesis operationalization: two-sided Bayes factor for fixed effect of BLINDED exceeding HAMD17 MCID ≥ 3. Posterior probability of hypothesis will also be reported (>95% deemed very strong support for non-equivalence hypothesis). 
+
+```{r}
+mod1_test <- brm(bf_mod1,family = gaussian(),
+                 data = df1,prior = prior_mods,
+                 chains = 12,cores=15,backend="cmdstanr",
+                 warmup = 2000, iter=5000,control = list(adapt_delta=0.999,max_treedepth=20)
+                 )
+
+bf_rope(as_draws_df(mod1_test)$b_dtypessri,prior=rnorm(36000,0,3),null = c(-3,3)) # 1.40 for 2-sided BF
+bf_rope(as_draws_df(mod1_test)$b_dtypessri,prior=rnorm(36000,0,3),null = c(-Inf,3)) # 3.40 for 1-sided BF
+mean(as_draws_df(mod1_test)$b_dtypessri > 3) # 39.3% of posterior > MCID [fairly weak support for non-equivalence]
+
+mod2_test <- brm(bf_mod23,family = gaussian(),
+                 data = df2,prior = prior_mods,
+                 chains = 12,cores=15,backend="cmdstanr",
+                 warmup = 2000, iter=5000,control = list(adapt_delta=0.999,max_treedepth=20)
+                 )
+
+bf_rope(as_draws_df(mod2_test)$b_is_blindTRUE,prior=rnorm(36000,0,3),null = c(-3,3)) # 0.162 for 2-sided BF
+mean(abs(as_draws_df(mod2_test)$b_is_blindTRUE) < 3)
+
+mod3_test <- brm(bf_mod23,family = gaussian(),
+                 data = df3,prior = prior_mods,
+                 chains = 12,cores=15,backend="cmdstanr",
+                 warmup = 2000, iter=5000,control = list(adapt_delta=0.999,max_treedepth=20)
+                 )
+
+bf_rope(as_draws_df(mod3_test)$b_is_blindTRUE,prior=rnorm(36000,0,3),null = c(-3,3)) # 5.86 for 2-sided BF
+bf_rope(as_draws_df(mod3_test)$b_is_blindTRUE,prior=rnorm(36000,0,3),null = c(-Inf,3)) # 14.88 for 1-sided BF
+mean(as_draws_df(mod3_test)$b_is_blindTRUE > 3) # 73.6% of posterior > MCID [moderate support for non-equivalence]
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
